@@ -14,6 +14,16 @@ The container layers a single Rust supervisor (`wechat-supervisor`) and WeChat's
 - **Process supervision and window fitting.** `wechat-supervisor` sets `PR_SET_CHILD_SUBREAPER` and launches `/usr/bin/wechat` in its own session (`setsid`) so stopping or restarting WeChat also reaps `WeChatAppEx` helper processes. Its X11 watcher (`x11rb`) resizes resizable WeChat windows to match Selkies RandR viewport changes and centers fixed-size dialogs such as the QR login window. It never injects synthetic mouse clicks or keystrokes.
 - **Health endpoint and optional notifications.** The supervisor serves `/healthz` and `/readyz` on `127.0.0.1:8090` for Docker `HEALTHCHECK` (`wechat-supervisor healthcheck`). Setting `WECHAT_NOTIFY_WEBHOOK_URL` enables a session D-Bus listener that posts notification summaries as JSON, with message bodies redacted by default (`WECHAT_NOTIFY_REDACT_BODY=true`).
 
+## Requirements
+
+- **Host:** Linux on `x86_64` (`amd64`) or `aarch64` (`arm64`) with Docker Engine and Docker Compose v2 (Compose v2.24 or newer if you use `compose.tailscale.yml`).
+- **RAM:** At least `2 GiB` available RAM. `docker-compose.yml` sets `mem_limit: 2g` and `shm_size: 1gb` (an upper cap, not reserved RAM). A logged-in session typically uses `450 MiB` to `1.2 GiB` depending on open media and articles.
+- **Disk:** At least `4 GiB` free for the container image (`~900 MB` compressed), the cached official WeChat `.deb` (`~230 MB` in `/config/.wechat-cache/`), and WeChat chat history in `/config`.
+- **Network:** Outbound HTTPS access to `dldir1v6.qq.com` on first boot to download and SHA-256 verify the official WeChat package, plus outbound access to WeChat servers during normal use.
+- **Browser and HTTPS:** A modern Chromium, Firefox, or Safari browser connected over HTTPS (or `localhost`). Browsers block WebCodecs hardware decoding, clipboard sync, microphone, and webcam on plain `http://` LAN IP addresses. Use Tailscale (`compose.tailscale.yml`, no public IP or VPS needed), a TLS reverse proxy or Cloudflare Tunnel with authentication, or container HTTPS port `3001` with `CUSTOM_USER` and `PASSWORD`.
+- **GPU (optional, recommended):** An Intel or AMD GPU exposed at `/dev/dri/renderD128` for zero-copy DRI3 capture and VA-API encoding, or an NVIDIA GPU with the NVIDIA Container Toolkit for NVENC. Without a GPU, remove `/dev/dri`, `DRINODE`, and `DRI_NODE` to encode in software (2 or more CPU cores recommended).
+- **Phone with WeChat:** Required to scan the initial QR code or confirm login.
+
 ## Run with Tailscale (no public IP required)
 
 Browsers require HTTPS (or `localhost`) for WebCodecs decoding, clipboard sync, microphone access, and webcam access. If your host is behind CGNAT or has no public IP, use the Tailscale sidecar to get automatic Let's Encrypt HTTPS and tailnet authentication with no open host ports.
