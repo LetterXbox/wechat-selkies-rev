@@ -1,0 +1,9 @@
+/target/
+/outputs/
+__pycache__/
+*.pyc
+*.deb
+*.tar.gz
+.DS_Store
+.env
+.env.local

@@ -1,0 +1,44 @@
+name: Track Upstream WeChat Metadata
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  check-upstream:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check official Tencent WeChat .deb SHA-256 and version
+        id: check
+        run: |
+          out=$(python3 scripts/check-upstream-wechat.py --manifest versions/wechat.json --write)
+          echo "$out"
+          changed=$(echo "$out" | python3 -c "import sys,json; print('true' if json.load(sys.stdin)['changed'] else 'false')")
+          amd64_ver=$(echo "$out" | python3 -c "import sys,json; print(json.load(sys.stdin)['amd64_version'])")
+          arm64_ver=$(echo "$out" | python3 -c "import sys,json; print(json.load(sys.stdin)['arm64_version'])")
+          echo "changed=${changed}" >> "$GITHUB_OUTPUT"
+          echo "amd64_version=${amd64_ver}" >> "$GITHUB_OUTPUT"
+          echo "arm64_version=${arm64_ver}" >> "$GITHUB_OUTPUT"
+
+      - name: Open pull request when upstream metadata changes
+        if: steps.check.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v7
+        with:
+          branch: chore/update-wechat-manifest
+          delete-branch: true
+          commit-message: "chore: update WeChat manifest to ${{ steps.check.outputs.amd64_version }}"
+          title: "chore: update upstream WeChat metadata (${{ steps.check.outputs.amd64_version }})"
+          body: |
+            Automated upstream metadata refresh from official Tencent URLs (`dldir1v6.qq.com`).
+
+            - `amd64`: `${{ steps.check.outputs.amd64_version }}`
+            - `arm64`: `${{ steps.check.outputs.arm64_version }}`
+
+            No Tencent binaries are committed; only version and SHA-256 metadata in `versions/wechat.json` were updated.

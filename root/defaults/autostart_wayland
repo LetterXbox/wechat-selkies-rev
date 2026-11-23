@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+export QT_QPA_PLATFORM="xcb"
+exec /usr/local/bin/wechat-supervisor run

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<openbox_menu>
+  <menu id="root-menu" label="WeChat">
+    <item label="Restart WeChat">
+      <action name="Execute" command="/usr/local/bin/wechat-supervisor restart" />
+    </item>
+    <item label="Reconfigure">
+      <action name="Reconfigure" />
+    </item>
+  </menu>
+</openbox_menu>

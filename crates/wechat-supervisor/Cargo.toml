@@ -1,0 +1,22 @@
+[package]
+name = "wechat-supervisor"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Clean-room WeChat Linux bootstrapper, process supervisor, X11 viewport fitter, and health probe"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive", "env"] }
+hex = "0.4"
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+ureq = { version = "2.12", default-features = false, features = ["tls"] }
+x11rb = { version = "0.13", features = ["randr"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

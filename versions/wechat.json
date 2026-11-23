@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "checked_at": "2026-11-23T05:37:00Z",
+  "architectures": {
+    "amd64": {
+      "url": "https://dldir1v6.qq.com/weixin/Universal/Linux/WeChatLinux_x86_64.deb",
+      "version": "4.1.13.29",
+      "sha256": "d5b21c6e21186a58b2c2fd41712a4ef90f9452735931a6b8500e85c5b0913b0b"
+    },
+    "arm64": {
+      "url": "https://dldir1v6.qq.com/weixin/Universal/Linux/WeChatLinux_arm64.deb",
+      "version": "4.1.13.29",
+      "sha256": "b9ee12ba417ff68840d57020ef7014abb23c7b4f4c00ce807672b100c90bc853"
+    }
+  }
+}

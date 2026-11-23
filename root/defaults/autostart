@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+rm -f /run/dbus/pid 2>/dev/null || true
+
+OB_RC="${HOME}/.config/openbox/rc.xml"
+if [ ! -f "${OB_RC}" ]; then
+  mkdir -p "${HOME}/.config/openbox"
+  cp /etc/xdg/openbox/rc.xml "${OB_RC}"
+fi
+
+if grep -A20 "<dock>" "${OB_RC}" | grep -q "<noStrut>no</noStrut>"; then
+  sed -i '/<dock>/,/<\/dock>/s/<noStrut>no<\/noStrut>/<noStrut>yes<\/noStrut>/' "${OB_RC}"
+fi
+
+if ! grep -q '<application class="wechat">' "${OB_RC}"; then
+  sed -i '/<\/openbox_config>/i \
+  <applications>\
+    <application class="wechat">\
+      <maximized>no</maximized>\
+    </application>\
+  </applications>' "${OB_RC}"
+fi
+openbox --reconfigure 2>/dev/null || true
+
+if [ "${WECHAT_SHOW_TRAY:-true}" = "true" ] && command -v stalonetray >/dev/null 2>&1; then
+  stalonetray --dockapp-mode simple >/dev/null 2>&1 &
+fi
+
+exec /usr/local/bin/wechat-supervisor run

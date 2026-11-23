@@ -1,0 +1,8 @@
+#!/usr/bin/with-contenv bash
+set -euo pipefail
+
+mkdir -p "${WECHAT_CACHE_DIR:-/config/.wechat-cache}" /var/lib/wechat-selkies
+chown abc:abc "${WECHAT_CACHE_DIR:-/config/.wechat-cache}"
+
+/usr/local/bin/wechat-supervisor bootstrap
+chown -R abc:abc "${WECHAT_CACHE_DIR:-/config/.wechat-cache}"

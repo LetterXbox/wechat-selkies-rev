@@ -1,0 +1,13 @@
+.git
+.github
+docs
+outputs
+target
+*.deb
+*.tar.gz
+.env
+.env.local
+README.md
+AGENTS.md
+docker-compose.yml
+compose.webrtc.yml

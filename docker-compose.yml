@@ -1,0 +1,35 @@
+services:
+  wechat-selkies-rev:
+    image: ${WECHAT_IMAGE:-ghcr.io/letterxbox/wechat-selkies-rev:latest}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: wechat-selkies-rev
+    restart: unless-stopped
+    ports:
+      - "${WECHAT_HTTP_PORT:-3011}:3000"
+    volumes:
+      - wechat-rev-config:/config
+    devices:
+      - /dev/dri:/dev/dri
+    environment:
+      - PUID=${PUID:-1000}
+      - PGID=${PGID:-1000}
+      - TZ=${TZ:-Asia/Shanghai}
+      - LC_ALL=${LC_ALL:-zh_CN.UTF-8}
+      - DRINODE=${DRINODE:-/dev/dri/renderD128}
+      - DRI_NODE=${DRI_NODE:-/dev/dri/renderD128}
+      - DISABLE_DRI3=${DISABLE_DRI3:-false}
+      - PIXELFLUX_WAYLAND=${PIXELFLUX_WAYLAND:-false}
+      - SELKIES_ENCODER=${SELKIES_ENCODER:-h264enc,vp9enc,h265enc,vp8enc}
+      - SELKIES_RATE_CONTROL_MODE=${SELKIES_RATE_CONTROL_MODE:-crf,cbr}
+      - SELKIES_VIDEO_CRF=${SELKIES_VIDEO_CRF:-25}
+      - AUTO_START_WECHAT=${AUTO_START_WECHAT:-true}
+      - WECHAT_WINDOW_AUTOFIT=${WECHAT_WINDOW_AUTOFIT:-true}
+      - WECHAT_SHOW_TRAY=${WECHAT_SHOW_TRAY:-true}
+      - WECHAT_HEALTH_PORT=${WECHAT_HEALTH_PORT:-8090}
+    shm_size: "1gb"
+    mem_limit: 2g
+
+volumes:
+  wechat-rev-config:
