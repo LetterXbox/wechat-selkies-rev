@@ -108,18 +108,19 @@ WeChat Selkies Rev runs cleanly without a GPU using x264/libvpx software encodin
 
 ## 5. Verifying Hardware Acceleration
 
-1. **Check Xvfb DRI3 startup in container logs:**
+1. **Check DRI3 and VA-API/NVENC startup in container logs:**
    ```bash
-   docker logs wechat-selkies-rev 2>&1 | grep -iE 'DRI3|glamor|i965|NVIDIA|va-api'
+   docker logs wechat-selkies-rev 2>&1 | grep -iE 'DRI3|pixelflux|i965|NVIDIA|vaapi'
    ```
-   Expected line on Intel:
+   Expected lines on Intel:
    ```text
    **** Xvfb using DRI3 on /dev/dri/renderD128 (i915) ****
+   [pixelflux] Render node 0 encodes H264, VP9, H265 on vaapi.
    ```
-2. **Verify VA-API profiles inside the container (Intel/AMD):**
-   ```bash
-   docker exec wechat-selkies-rev vainfo --display drm --device /dev/dri/renderD128
-   ```
-   Look for `VAEntrypointEncSlice` / `VAEntrypointEncSliceLP` entries under `VAProfileH264Main` / `VAProfileH264High` or `VAProfileVP9Profile0`.
-3. **Confirm in the Selkies browser sidebar:**
+2. **Confirm in the Selkies browser sidebar:**
    Open the Selkies side menu -> **Stats** while scrolling WeChat. Verify the active encoder is `h264enc` or `vp9enc` (hardware VA-API/NVENC) with low encode latency and client-side WebCodecs decoding.
+3. **Optional low-level VA-API profile check (on the host or after installing `vainfo`):**
+   ```bash
+   vainfo --display drm --device /dev/dri/renderD128
+   ```
+   Look for `VAEntrypointEncSlice` / `VAEntrypointEncSliceLP` entries under `VAProfileH264Main`, `VAProfileH264High`, or `VAProfileVP9Profile0`.
