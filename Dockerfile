@@ -1,12 +1,33 @@
 # syntax=docker/dockerfile:1
 
-FROM rust:1-slim-trixie AS supervisor-builder
+FROM --platform=$BUILDPLATFORM rust:1-slim-trixie AS supervisor-builder
+
+ARG TARGETARCH
 
 WORKDIR /build
+
+RUN if [ "${TARGETARCH}" = "arm64" ] && [ "$(uname -m)" != "aarch64" ]; then \
+      apt-get update && \
+      DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        gcc-aarch64-linux-gnu \
+        libc6-dev-arm64-cross && \
+      rm -rf /var/lib/apt/lists/* && \
+      rustup target add aarch64-unknown-linux-gnu; \
+    fi
+
 COPY crates/wechat-supervisor/Cargo.toml crates/wechat-supervisor/Cargo.lock ./
 COPY crates/wechat-supervisor/src ./src
 
-RUN cargo build --release --locked
+RUN if [ "${TARGETARCH}" = "arm64" ] && [ "$(uname -m)" != "aarch64" ]; then \
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
+      CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc \
+      AR_aarch64_unknown_linux_gnu=aarch64-linux-gnu-ar \
+      cargo build --release --locked --target aarch64-unknown-linux-gnu && \
+      cp target/aarch64-unknown-linux-gnu/release/wechat-supervisor /build/wechat-supervisor; \
+    else \
+      cargo build --release --locked && \
+      cp target/release/wechat-supervisor /build/wechat-supervisor; \
+    fi
 
 FROM ghcr.io/linuxserver/baseimage-selkies:debiantrixie@sha256:793fc3628ad6e089aecfd9f862de3ad5d9df05f1db783363c812f77d6541ccc3
 
@@ -50,7 +71,7 @@ RUN apt-get update && \
 # Allow Openbox dock to avoid reserving full-height struts for stalonetray
 RUN sed -i '/<dock>/,/<\/dock>/s/<noStrut>no<\/noStrut>/<noStrut>yes<\/noStrut>/' /etc/xdg/openbox/rc.xml
 
-COPY --from=supervisor-builder /build/target/release/wechat-supervisor /usr/local/bin/wechat-supervisor
+COPY --from=supervisor-builder /build/wechat-supervisor /usr/local/bin/wechat-supervisor
 COPY versions/wechat.json /etc/wechat-selkies/wechat.json
 COPY root/ /
 

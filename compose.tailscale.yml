@@ -15,6 +15,7 @@ services:
 
   wechat-selkies-rev:
     network_mode: "service:tailscale"
+    hostname: !reset null
     ports: !reset []
     depends_on:
       - tailscale

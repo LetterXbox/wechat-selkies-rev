@@ -14,6 +14,7 @@ use crate::manifest::{
 
 const INSTALLED_MARKER: &str = "installed.sha256";
 const INSTALLED_VERSION_MARKER: &str = "installed.version";
+const MACHINE_ID_FILE: &str = "machine-id";
 
 pub fn run_bootstrap(cfg: &BootstrapConfig) -> Result<()> {
     let manifest = load_manifest(&cfg.manifest_path)?;
@@ -30,6 +31,16 @@ pub fn run_bootstrap(cfg: &BootstrapConfig) -> Result<()> {
         .with_context(|| format!("failed to create cache dir {}", cfg.cache_dir.display()))?;
     fs::create_dir_all(&cfg.state_dir)
         .with_context(|| format!("failed to create state dir {}", cfg.state_dir.display()))?;
+
+    if let Err(err) = ensure_persistent_machine_id(
+        &cfg.cache_dir.join(MACHINE_ID_FILE),
+        &[
+            Path::new("/etc/machine-id"),
+            Path::new("/var/lib/dbus/machine-id"),
+        ],
+    ) {
+        eprintln!("[wechat-bootstrap] Warning: could not sync persistent machine-id: {err}");
+    }
 
     let marker_path = cfg.state_dir.join(INSTALLED_MARKER);
     if let Some(expected) = pkg.expected_sha256.as_deref() {
@@ -63,6 +74,62 @@ pub fn run_bootstrap(cfg: &BootstrapConfig) -> Result<()> {
         &actual_sha256[..12]
     );
     Ok(())
+}
+
+pub fn ensure_persistent_machine_id(persisted_path: &Path, targets: &[&Path]) -> Result<String> {
+    let machine_id = match read_valid_machine_id(persisted_path) {
+        Some(existing) => existing,
+        None => {
+            let candidate = targets
+                .iter()
+                .find_map(|p| read_valid_machine_id(p))
+                .unwrap_or(generate_machine_id()?);
+            if let Some(parent) = persisted_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::write(persisted_path, format!("{candidate}\n")).with_context(|| {
+                format!(
+                    "failed to write persistent machine-id {}",
+                    persisted_path.display()
+                )
+            })?;
+            candidate
+        }
+    };
+
+    let content = format!("{machine_id}\n");
+    for target in targets {
+        if read_valid_machine_id(target).as_deref() == Some(machine_id.as_str()) {
+            continue;
+        }
+        if let Some(parent) = target.parent() {
+            if !parent.exists() {
+                let _ = fs::create_dir_all(parent);
+            }
+        }
+        let _ = fs::write(target, &content);
+    }
+
+    Ok(machine_id)
+}
+
+fn read_valid_machine_id(path: &Path) -> Option<String> {
+    let raw = fs::read_to_string(path).ok()?;
+    let trimmed = raw.trim().to_ascii_lowercase();
+    if trimmed.len() == 32 && trimmed.bytes().all(|b| b.is_ascii_hexdigit()) {
+        Some(trimmed)
+    } else {
+        None
+    }
+}
+
+fn generate_machine_id() -> Result<String> {
+    let mut bytes = [0u8; 16];
+    let mut urandom = File::open("/dev/urandom").context("failed to open /dev/urandom")?;
+    urandom
+        .read_exact(&mut bytes)
+        .context("failed to read random bytes for machine-id")?;
+    Ok(hex::encode(bytes))
 }
 
 pub fn read_installed_version(state_dir: &Path) -> Option<String> {
@@ -247,5 +314,60 @@ fn sync_runtime_icons() {
         if dst_path.parent().map(Path::exists).unwrap_or(false) {
             let _ = fs::copy(src, dst_path);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_temp_dir(label: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "wechat-supervisor-{label}-{}-{nanos}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn generates_and_syncs_persistent_machine_id() {
+        let dir = unique_temp_dir("gen");
+        let persisted = dir.join("cache/machine-id");
+        let etc_id = dir.join("etc/machine-id");
+        let dbus_id = dir.join("dbus/machine-id");
+
+        let first = ensure_persistent_machine_id(&persisted, &[&etc_id, &dbus_id]).unwrap();
+        assert_eq!(first.len(), 32);
+        assert!(first.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert_eq!(fs::read_to_string(&etc_id).unwrap().trim(), first);
+        assert_eq!(fs::read_to_string(&dbus_id).unwrap().trim(), first);
+
+        fs::write(&etc_id, "00000000000000000000000000000000\n").unwrap();
+        let second = ensure_persistent_machine_id(&persisted, &[&etc_id, &dbus_id]).unwrap();
+        assert_eq!(second, first);
+        assert_eq!(fs::read_to_string(&etc_id).unwrap().trim(), first);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn replaces_corrupt_persisted_machine_id() {
+        let dir = unique_temp_dir("corrupt");
+        let persisted = dir.join("machine-id");
+        let target = dir.join("target-machine-id");
+        fs::write(&persisted, "not-a-valid-id\n").unwrap();
+
+        let id = ensure_persistent_machine_id(&persisted, &[&target]).unwrap();
+        assert_eq!(id.len(), 32);
+        assert_eq!(fs::read_to_string(&persisted).unwrap().trim(), id);
+        assert_eq!(fs::read_to_string(&target).unwrap().trim(), id);
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }
