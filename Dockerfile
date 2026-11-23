@@ -68,8 +68,11 @@ RUN apt-get update && \
     apt-get autoclean && \
     rm -rf /var/lib/apt/lists/* /var/tmp/* /tmp/*
 
-# Allow Openbox dock to avoid reserving full-height struts for stalonetray
-RUN sed -i '/<dock>/,/<\/dock>/s/<noStrut>no<\/noStrut>/<noStrut>yes<\/noStrut>/' /etc/xdg/openbox/rc.xml
+# Place Openbox dock at BottomRight without struts so stalonetray never covers WeChat's top-left rail
+RUN sed -i \
+      -e '/<dock>/,/<\/dock>/s/<position>[^<]*<\/position>/<position>BottomRight<\/position>/' \
+      -e '/<dock>/,/<\/dock>/s/<noStrut>no<\/noStrut>/<noStrut>yes<\/noStrut>/' \
+      /etc/xdg/openbox/rc.xml
 
 COPY --from=supervisor-builder /build/wechat-supervisor /usr/local/bin/wechat-supervisor
 COPY versions/wechat.json /etc/wechat-selkies/wechat.json

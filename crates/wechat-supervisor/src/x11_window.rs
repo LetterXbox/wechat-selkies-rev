@@ -1,4 +1,5 @@
 use anyhow::Result;
+use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -6,17 +7,20 @@ use std::time::{Duration, Instant};
 use x11rb::connection::Connection;
 use x11rb::protocol::randr::{ConnectionExt as _, NotifyMask};
 use x11rb::protocol::xproto::{
-    Atom, AtomEnum, ChangeWindowAttributesAux, ClientMessageEvent, ConfigureWindowAux,
-    ConnectionExt as _, EventMask, StackMode, Window,
+    Atom, AtomEnum, ChangeWindowAttributesAux, ClientMessageEvent, ConnectionExt as _, EventMask,
+    Window,
 };
 use x11rb::protocol::Event;
 use x11rb::rust_connection::RustConnection;
 
 use crate::health::SharedState;
 
-const TRAY_RESERVE_PX: u16 = 28;
 const MIN_MAIN_WIDTH: u16 = 520;
 const MIN_MAIN_HEIGHT: u16 = 420;
+const GEOMETRY_TOLERANCE_PX: i32 = 2;
+
+// EWMH _NET_MOVERESIZE_WINDOW flags: NorthWest gravity (1) + X|Y|W|H (bits 8..11) + pager source (2 << 12).
+const MOVERESIZE_FLAGS: u32 = 1 | (1 << 8) | (1 << 9) | (1 << 10) | (1 << 11) | (2 << 12);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TargetGeometry {
@@ -50,14 +54,7 @@ pub fn compute_window_geometry(
     current_w: u16,
     current_h: u16,
     hints: SizeHints,
-    reserve_tray: bool,
 ) -> TargetGeometry {
-    let usable_h = if reserve_tray && viewport_h > TRAY_RESERVE_PX + 100 {
-        viewport_h - TRAY_RESERVE_PX
-    } else {
-        viewport_h
-    };
-
     if hints.is_fixed_size() {
         let w = hints
             .min_width
@@ -66,24 +63,24 @@ pub fn compute_window_geometry(
         let h = hints
             .min_height
             .unwrap_or(current_h as u32)
-            .min(usable_h as u32);
+            .min(viewport_h as u32);
         let x = ((viewport_w as i32) - (w as i32)).max(0) / 2;
-        let y = ((usable_h as i32) - (h as i32)).max(0) / 2;
+        let y = ((viewport_h as i32) - (h as i32)).max(0) / 2;
         return TargetGeometry {
             x,
             y,
-            width: w,
-            height: h,
+            width: w.max(1),
+            height: h.max(1),
         };
     }
 
     let mut w = viewport_w as u32;
-    let mut h = usable_h as u32;
+    let mut h = viewport_h as u32;
     if let Some(min_w) = hints.min_width {
         w = w.max(min_w.min(viewport_w as u32));
     }
     if let Some(min_h) = hints.min_height {
-        h = h.max(min_h.min(usable_h as u32));
+        h = h.max(min_h.min(viewport_h as u32));
     }
     if let Some(max_w) = hints.max_width.filter(|&v| v > 0) {
         w = w.min(max_w);
@@ -94,32 +91,46 @@ pub fn compute_window_geometry(
 
     TargetGeometry {
         x: ((viewport_w as i32) - (w as i32)).max(0) / 2,
-        y: ((usable_h as i32) - (h as i32)).max(0) / 2,
+        y: ((viewport_h as i32) - (h as i32)).max(0) / 2,
         width: w.max(1),
         height: h.max(1),
     }
 }
 
-pub fn spawn_watcher(state: Arc<SharedState>, show_tray: bool) -> Result<JoinHandle<()>> {
+pub fn geometry_matches(
+    abs_x: i32,
+    abs_y: i32,
+    width: u16,
+    height: u16,
+    target: TargetGeometry,
+) -> bool {
+    (abs_x - target.x).abs() <= GEOMETRY_TOLERANCE_PX
+        && (abs_y - target.y).abs() <= GEOMETRY_TOLERANCE_PX
+        && (width as i32 - target.width as i32).abs() <= GEOMETRY_TOLERANCE_PX
+        && (height as i32 - target.height as i32).abs() <= GEOMETRY_TOLERANCE_PX
+}
+
+pub fn spawn_watcher(state: Arc<SharedState>, _show_tray: bool) -> Result<JoinHandle<()>> {
     let handle = std::thread::Builder::new()
         .name("x11-autofit".to_string())
-        .spawn(move || watcher_loop(state, show_tray))?;
+        .spawn(move || watcher_loop(state))?;
     Ok(handle)
 }
 
-pub fn fit_once(show_tray: bool) -> Result<()> {
+pub fn fit_once(_show_tray: bool) -> Result<()> {
     let (conn, screen_num) = x11rb::connect(None)?;
     let root = conn.setup().roots[screen_num].root;
     let atoms = Atoms::intern(&conn)?;
-    let _ = fit_wechat_windows(&conn, root, &atoms, show_tray, true);
+    let mut centered_dialogs = HashSet::new();
+    let _ = fit_wechat_windows(&conn, root, &atoms, true, true, &mut centered_dialogs);
     Ok(())
 }
 
-fn watcher_loop(state: Arc<SharedState>, show_tray: bool) {
+fn watcher_loop(state: Arc<SharedState>) {
     while !state.shutdown.load(Ordering::Relaxed) {
         match x11rb::connect(None) {
             Ok((conn, screen_num)) => {
-                if let Err(err) = run_connected_loop(&conn, screen_num, &state, show_tray) {
+                if let Err(err) = run_connected_loop(&conn, screen_num, &state) {
                     eprintln!("[wechat-x11] Disconnected from X11: {err}");
                 }
                 state.set_display_state(false, None);
@@ -132,12 +143,7 @@ fn watcher_loop(state: Arc<SharedState>, show_tray: bool) {
     }
 }
 
-fn run_connected_loop(
-    conn: &RustConnection,
-    screen_num: usize,
-    state: &SharedState,
-    show_tray: bool,
-) -> Result<()> {
+fn run_connected_loop(conn: &RustConnection, screen_num: usize, state: &SharedState) -> Result<()> {
     let root = conn.setup().roots[screen_num].root;
     let atoms = Atoms::intern(conn)?;
 
@@ -151,15 +157,18 @@ fn run_connected_loop(
 
     let mut last_viewport: Option<(u16, u16)> = None;
     let mut last_fit = Instant::now() - Duration::from_secs(10);
+    let mut centered_dialogs: HashSet<Window> = HashSet::new();
 
     while !state.shutdown.load(Ordering::Relaxed) {
-        let mut need_fit = state.fit_requested.swap(false, Ordering::SeqCst);
-        let mut raise_window = need_fit;
+        let explicit_fit = state.fit_requested.swap(false, Ordering::SeqCst);
+        let mut need_fit = explicit_fit;
+        let mut viewport_changed = false;
 
         while let Some(event) = conn.poll_for_event()? {
             match event {
-                Event::RandrScreenChangeNotify(_) | Event::ConfigureNotify(_) => {
+                Event::RandrScreenChangeNotify(_) => {
                     need_fit = true;
+                    viewport_changed = true;
                 }
                 Event::PropertyNotify(ev) if ev.atom == atoms.net_client_list => {
                     need_fit = true;
@@ -174,15 +183,25 @@ fn run_connected_loop(
             if last_viewport != Some(vp) {
                 last_viewport = Some(vp);
                 need_fit = true;
+                viewport_changed = true;
             }
         }
 
-        if need_fit && (raise_window || last_fit.elapsed() >= Duration::from_millis(350)) {
-            let _ = fit_wechat_windows(conn, root, &atoms, show_tray, raise_window);
-            last_fit = Instant::now();
-            raise_window = false;
+        if viewport_changed {
+            centered_dialogs.clear();
         }
-        let _ = raise_window;
+
+        if need_fit && (explicit_fit || last_fit.elapsed() >= Duration::from_millis(350)) {
+            let _ = fit_wechat_windows(
+                conn,
+                root,
+                &atoms,
+                explicit_fit,
+                explicit_fit || viewport_changed,
+                &mut centered_dialogs,
+            );
+            last_fit = Instant::now();
+        }
 
         std::thread::sleep(Duration::from_millis(150));
     }
@@ -194,6 +213,7 @@ struct Atoms {
     net_wm_window_type: Atom,
     net_wm_window_type_normal: Atom,
     net_active_window: Atom,
+    net_moveresize_window: Atom,
     net_wm_state: Atom,
     net_wm_state_maximized_horz: Atom,
     net_wm_state_maximized_vert: Atom,
@@ -208,6 +228,7 @@ impl Atoms {
             net_wm_window_type: intern(b"_NET_WM_WINDOW_TYPE")?,
             net_wm_window_type_normal: intern(b"_NET_WM_WINDOW_TYPE_NORMAL")?,
             net_active_window: intern(b"_NET_ACTIVE_WINDOW")?,
+            net_moveresize_window: intern(b"_NET_MOVERESIZE_WINDOW")?,
             net_wm_state: intern(b"_NET_WM_STATE")?,
             net_wm_state_maximized_horz: intern(b"_NET_WM_STATE_MAXIMIZED_HORZ")?,
             net_wm_state_maximized_vert: intern(b"_NET_WM_STATE_MAXIMIZED_VERT")?,
@@ -219,8 +240,9 @@ fn fit_wechat_windows(
     conn: &RustConnection,
     root: Window,
     atoms: &Atoms,
-    show_tray: bool,
     raise: bool,
+    recenter_dialogs: bool,
+    centered_dialogs: &mut HashSet<Window>,
 ) -> Result<()> {
     let root_geom = conn.get_geometry(root)?.reply()?;
     let prop = conn
@@ -233,9 +255,11 @@ fn fit_wechat_windows(
             1024,
         )?
         .reply()?;
-    let Some(windows) = prop.value32() else {
+    let Some(windows_iter) = prop.value32() else {
         return Ok(());
     };
+    let windows: Vec<Window> = windows_iter.collect();
+    centered_dialogs.retain(|w| windows.contains(w));
 
     for win in windows {
         if !is_wechat_normal_window(conn, win, atoms)? {
@@ -246,8 +270,12 @@ fn fit_wechat_windows(
         };
         let hints = read_size_hints(conn, win).unwrap_or_default();
 
-        if !hints.is_fixed_size()
-            && geom.width < MIN_MAIN_WIDTH
+        if hints.is_fixed_size() {
+            if !recenter_dialogs && centered_dialogs.contains(&win) {
+                continue;
+            }
+            centered_dialogs.insert(win);
+        } else if geom.width < MIN_MAIN_WIDTH
             && geom.height < MIN_MAIN_HEIGHT
             && hints.min_width.unwrap_or(0) < MIN_MAIN_WIDTH as u32
         {
@@ -260,21 +288,21 @@ fn fit_wechat_windows(
             geom.width,
             geom.height,
             hints,
-            show_tray,
         );
 
-        clear_maximized_state(conn, root, win, atoms);
-        let mut aux = ConfigureWindowAux::new()
-            .x(target.x)
-            .y(target.y)
-            .width(target.width)
-            .height(target.height);
+        let (abs_x, abs_y) = conn
+            .translate_coordinates(win, root, 0, 0)
+            .ok()
+            .and_then(|cookie| cookie.reply().ok())
+            .map(|r| (r.dst_x as i32, r.dst_y as i32))
+            .unwrap_or((geom.x as i32, geom.y as i32));
+
+        if !geometry_matches(abs_x, abs_y, geom.width, geom.height, target) {
+            clear_maximized_state(conn, root, win, atoms);
+            moveresize_window(conn, root, win, target, atoms);
+        }
         if raise {
             let _ = conn.map_window(win);
-            aux = aux.stack_mode(StackMode::ABOVE);
-        }
-        let _ = conn.configure_window(win, &aux);
-        if raise {
             activate_window(conn, root, win, atoms);
         }
     }
@@ -336,6 +364,34 @@ fn read_size_hints(conn: &RustConnection, win: Window) -> Result<SizeHints> {
     })
 }
 
+fn moveresize_window(
+    conn: &RustConnection,
+    root: Window,
+    win: Window,
+    target: TargetGeometry,
+    atoms: &Atoms,
+) {
+    // Use EWMH _NET_MOVERESIZE_WINDOW with NorthWest gravity so Openbox does not drift StaticGravity Qt frames.
+    let ev = ClientMessageEvent::new(
+        32,
+        win,
+        atoms.net_moveresize_window,
+        [
+            MOVERESIZE_FLAGS,
+            target.x.max(0) as u32,
+            target.y.max(0) as u32,
+            target.width,
+            target.height,
+        ],
+    );
+    let _ = conn.send_event(
+        false,
+        root,
+        EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY,
+        ev,
+    );
+}
+
 fn clear_maximized_state(conn: &RustConnection, root: Window, win: Window, atoms: &Atoms) {
     let ev = ClientMessageEvent::new(
         32,
@@ -372,15 +428,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fits_resizable_main_window_to_viewport_with_tray_margin() {
-        let geom = compute_window_geometry(1920, 1080, 900, 700, SizeHints::default(), true);
+    fn fits_resizable_main_window_to_full_viewport() {
+        let geom = compute_window_geometry(3816, 1744, 1908, 872, SizeHints::default());
         assert_eq!(
             geom,
             TargetGeometry {
                 x: 0,
                 y: 0,
-                width: 1920,
-                height: 1080 - TRAY_RESERVE_PX as u32,
+                width: 3816,
+                height: 1744,
             }
         );
     }
@@ -393,7 +449,7 @@ mod tests {
             max_width: Some(380),
             max_height: Some(500),
         };
-        let geom = compute_window_geometry(1280, 800, 380, 500, hints, false);
+        let geom = compute_window_geometry(1280, 800, 380, 500, hints);
         assert_eq!(
             geom,
             TargetGeometry {
@@ -403,5 +459,17 @@ mod tests {
                 height: 500,
             }
         );
+    }
+
+    #[test]
+    fn geometry_matches_within_tolerance() {
+        let target = TargetGeometry {
+            x: 0,
+            y: 0,
+            width: 3816,
+            height: 1744,
+        };
+        assert!(geometry_matches(0, 0, 3816, 1744, target));
+        assert!(!geometry_matches(-133, 117, 3816, 1716, target));
     }
 }
