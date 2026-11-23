@@ -103,7 +103,7 @@ Set these variables in `.env` or your Compose file. See [`.env.example`](.env.ex
 | `SELKIES_ENCODER` | `h264enc,vp9enc,h265enc,vp8enc` | Allowed video encoders in preference order. |
 | `AUTO_START_WECHAT` | `true` | Launch and supervise WeChat on session start. |
 | `WECHAT_WINDOW_AUTOFIT` | `true` | Fit resizable WeChat windows to the browser viewport and center fixed-size dialogs. |
-| `WECHAT_SHOW_TRAY` | `true` | Run `stalonetray` in the bottom-right dock corner for restoring WeChat from tray. |
+| `WECHAT_SHOW_TRAY` | `true` | Run `stalonetray` in the top-left dock corner for restoring WeChat from tray. |
 | `WECHAT_DEB_URL`, `WECHAT_DEB_SHA256` | From `versions/wechat.json` | Override the official `.deb` download URL or expected SHA-256 digest. |
 | `WECHAT_NOTIFY_WEBHOOK_URL` | Empty (disabled) | Webhook endpoint for D-Bus desktop notification forwarding. |
 | `WECHAT_NOTIFY_REDACT_BODY` | `true` | Omit message bodies from forwarded notification payloads. |

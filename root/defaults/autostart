@@ -12,7 +12,7 @@ fi
 if grep -A20 "<dock>" "${OB_RC}" | grep -q "<noStrut>no</noStrut>"; then
   sed -i '/<dock>/,/<\/dock>/s/<noStrut>no<\/noStrut>/<noStrut>yes<\/noStrut>/' "${OB_RC}"
 fi
-sed -i '/<dock>/,/<\/dock>/s/<position>[^<]*<\/position>/<position>BottomRight<\/position>/' "${OB_RC}"
+sed -i '/<dock>/,/<\/dock>/s/<position>[^<]*<\/position>/<position>TopLeft<\/position>/' "${OB_RC}"
 
 if ! grep -q '<application class="wechat">' "${OB_RC}"; then
   sed -i '/<\/openbox_config>/i \

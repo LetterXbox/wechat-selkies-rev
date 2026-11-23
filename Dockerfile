@@ -68,9 +68,9 @@ RUN apt-get update && \
     apt-get autoclean && \
     rm -rf /var/lib/apt/lists/* /var/tmp/* /tmp/*
 
-# Place Openbox dock at BottomRight without struts so stalonetray never covers WeChat's top-left rail
+# Keep Openbox dock at TopLeft without struts so it stays anchored across RandR resizes
 RUN sed -i \
-      -e '/<dock>/,/<\/dock>/s/<position>[^<]*<\/position>/<position>BottomRight<\/position>/' \
+      -e '/<dock>/,/<\/dock>/s/<position>[^<]*<\/position>/<position>TopLeft<\/position>/' \
       -e '/<dock>/,/<\/dock>/s/<noStrut>no<\/noStrut>/<noStrut>yes<\/noStrut>/' \
       /etc/xdg/openbox/rc.xml
 
