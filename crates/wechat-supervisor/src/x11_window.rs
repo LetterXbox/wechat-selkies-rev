@@ -15,8 +15,8 @@ use x11rb::rust_connection::RustConnection;
 
 use crate::health::SharedState;
 
-const MIN_MAIN_WIDTH: u16 = 520;
-const MIN_MAIN_HEIGHT: u16 = 420;
+const MIN_MAIN_WIDTH: u16 = 400;
+const MIN_MAIN_HEIGHT: u16 = 380;
 const MIN_LOGIN_WIDTH: u32 = 200;
 const MIN_LOGIN_HEIGHT: u32 = 200;
 const GEOMETRY_TOLERANCE_PX: i32 = 2;
@@ -221,8 +221,8 @@ pub fn compute_window_geometry(
     }
 
     TargetGeometry {
-        x: ((viewport_w as i32) - (w as i32)).max(0) / 2,
-        y: ((viewport_h as i32) - (h as i32)).max(0) / 2,
+        x: 0,
+        y: 0,
         width: w.max(1),
         height: h.max(1),
     }
@@ -355,6 +355,7 @@ struct Atoms {
     net_wm_window_type: Atom,
     net_wm_window_type_normal: Atom,
     net_wm_window_type_dialog: Atom,
+    kde_net_wm_window_type_override: Atom,
     net_active_window: Atom,
     net_moveresize_window: Atom,
     net_wm_state: Atom,
@@ -374,6 +375,7 @@ impl Atoms {
             net_wm_window_type: intern(b"_NET_WM_WINDOW_TYPE")?,
             net_wm_window_type_normal: intern(b"_NET_WM_WINDOW_TYPE_NORMAL")?,
             net_wm_window_type_dialog: intern(b"_NET_WM_WINDOW_TYPE_DIALOG")?,
+            kde_net_wm_window_type_override: intern(b"_KDE_NET_WM_WINDOW_TYPE_OVERRIDE")?,
             net_active_window: intern(b"_NET_ACTIVE_WINDOW")?,
             net_moveresize_window: intern(b"_NET_MOVERESIZE_WINDOW")?,
             net_wm_state: intern(b"_NET_WM_STATE")?,
@@ -494,6 +496,21 @@ fn read_wm_class(conn: &RustConnection, win: Window) -> Result<String> {
     Ok(String::from_utf8_lossy(&class_reply.value).into_owned())
 }
 
+fn classify_window_types(
+    types: &[Atom],
+    normal: Atom,
+    dialog: Atom,
+    kde_override: Atom,
+) -> PrimaryWindowType {
+    // Qt prepends _KDE_NET_WM_WINDOW_TYPE_OVERRIDE on frameless windows before the EWMH type.
+    match types.iter().copied().find(|&t| t != kde_override) {
+        None => PrimaryWindowType::Normal,
+        Some(t) if t == normal => PrimaryWindowType::Normal,
+        Some(t) if t == dialog => PrimaryWindowType::Dialog,
+        Some(_) => PrimaryWindowType::Other,
+    }
+}
+
 fn read_primary_window_type(
     conn: &RustConnection,
     win: Window,
@@ -502,15 +519,16 @@ fn read_primary_window_type(
     let type_reply = conn
         .get_property(false, win, atoms.net_wm_window_type, AtomEnum::ATOM, 0, 16)?
         .reply()?;
-    let Some(mut types) = type_reply.value32() else {
-        return Ok(PrimaryWindowType::Normal);
-    };
-    match types.next() {
-        None => Ok(PrimaryWindowType::Normal),
-        Some(t) if t == atoms.net_wm_window_type_normal => Ok(PrimaryWindowType::Normal),
-        Some(t) if t == atoms.net_wm_window_type_dialog => Ok(PrimaryWindowType::Dialog),
-        Some(_) => Ok(PrimaryWindowType::Other),
-    }
+    let types: Vec<Atom> = type_reply
+        .value32()
+        .map(|it| it.collect())
+        .unwrap_or_default();
+    Ok(classify_window_types(
+        &types,
+        atoms.net_wm_window_type_normal,
+        atoms.net_wm_window_type_dialog,
+        atoms.kde_net_wm_window_type_override,
+    ))
 }
 
 fn is_transient_window(conn: &RustConnection, win: Window) -> Result<bool> {
@@ -881,6 +899,71 @@ mod tests {
                 800
             ),
             None
+        );
+    }
+
+    #[test]
+    fn classifies_kde_override_prefix_using_underlying_ewmh_type() {
+        const NORMAL: Atom = 1;
+        const DIALOG: Atom = 2;
+        const KDE_OVERRIDE: Atom = 3;
+        const POPUP_MENU: Atom = 4;
+
+        assert_eq!(
+            classify_window_types(&[KDE_OVERRIDE, NORMAL], NORMAL, DIALOG, KDE_OVERRIDE),
+            PrimaryWindowType::Normal
+        );
+        assert_eq!(
+            classify_window_types(
+                &[KDE_OVERRIDE, DIALOG, NORMAL],
+                NORMAL,
+                DIALOG,
+                KDE_OVERRIDE
+            ),
+            PrimaryWindowType::Dialog
+        );
+        assert_eq!(
+            classify_window_types(
+                &[KDE_OVERRIDE, POPUP_MENU, NORMAL],
+                NORMAL,
+                DIALOG,
+                KDE_OVERRIDE
+            ),
+            PrimaryWindowType::Other
+        );
+    }
+
+    #[test]
+    fn fits_wechat_main_window_at_minimum_height_408_flush_to_origin() {
+        let main = WindowCandidate {
+            window: 0x1600014,
+            wm_class: "wechat\0wechat".to_string(),
+            primary_type: PrimaryWindowType::Normal,
+            is_transient: false,
+            has_auxiliary_state: false,
+            width: 946,
+            height: 408,
+            hints: SizeHints {
+                min_width: Some(420),
+                min_height: Some(408),
+                max_width: Some(1484),
+                max_height: Some(678),
+            },
+        };
+
+        let selected = select_window_to_fit(&[main], None, 1488, 678);
+        assert_eq!(
+            selected,
+            Some(FitSelection {
+                window: 0x1600014,
+                kind: FitTargetKind::Main,
+                geometry: TargetGeometry {
+                    x: 0,
+                    y: 0,
+                    width: 1484,
+                    height: 678,
+                },
+            })
         );
     }
 }
