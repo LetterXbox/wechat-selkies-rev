@@ -72,6 +72,12 @@ WebSockets over a single TCP port are the default. To opt into UDP WebRTC transp
 docker compose -f docker-compose.yml -f compose.webrtc.yml up -d
 ```
 
+## Mini programs and the Chromium sandbox
+
+WeChat runs mini programs in `WeChatAppEx`, a Chromium-based runtime whose sandbox creates user, PID, and network namespaces. Docker's default seccomp profile blocks those namespaces for unprivileged processes, so `WeChatAppEx` aborts at startup (`zygote_host_impl_linux.cc: Check failed: Operation not permitted`) and the mini program button does nothing.
+
+`docker-compose.yml` sets `security_opt: [seccomp=unconfined]` so the sandbox can start. This removes Docker's syscall filter for the container, while the Chromium sandbox still isolates `WeChatAppEx` renderers. If you start the container another way, pass `--security-opt seccomp=unconfined`. If you leave it out, chat works but mini programs do not open.
+
 ## Private image with WeChat pre-installed
 
 Published GHCR images never contain WeChat. For a private build on your own machine that skips the first-boot download, pass `INSTALL_WECHAT_AT_BUILD=true`:
