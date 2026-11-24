@@ -44,6 +44,26 @@ docker compose up -d
 - **Cloudflare Tunnel.** Point `cloudflared` at `http://127.0.0.1:3011` and require login through Cloudflare Access.
 - **Built-in HTTPS.** Open `https://<host>:3012`, which serves a self-signed certificate. Set `PASSWORD` (and optionally `CUSTOM_USER`, which defaults to `abc`) in `.env` to require Basic Auth.
 
+### Hosting separate instances for trusted users (Authelia / SSO)
+
+To host an instance for another person (such as a family member or friend), run one container per user behind your TLS reverse proxy and SSO provider:
+
+- **Isolate container state.** Give each instance its own `container_name`, persistent `/config` volume, and stable `hostname` (for WeChat auto-login). Multiple containers can share `/dev/dri`; budget roughly 1 to 2 GiB of RAM per active user.
+- **Do not expose host ports directly.** Attach each container to the reverse proxy's internal Docker network (or bind `127.0.0.1:<port>:3000` only) so traffic cannot bypass authentication. Leave `PASSWORD` unset inside the container when SSO handles login.
+- **Pin each subdomain to its owner.** Assign each user a dedicated subdomain (such as `alice-wechat.example.com`) and restrict access by username so other authenticated users on the same SSO server cannot open another user's session. For example, in Authelia:
+
+  ```yaml
+  access_control:
+    default_policy: deny
+    rules:
+      - domain: "alice-wechat.example.com"
+        subject: "user:alice"
+        policy: two_factor
+  ```
+
+- **Keep WebSocket timeouts long.** Authelia `forward_auth` validates the session cookie on the initial HTTP and WebSocket upgrade requests. Ensure your proxy forwards `Upgrade` and `Connection` headers and uses a long read timeout (for example, `proxy_read_timeout 3600s` in Nginx; Caddy handles WebSockets automatically).
+- **Privacy boundary.** Because the host administrator has access to every `/config` volume and running container, only host instances for people who explicitly trust you with their session data.
+
 ## WebRTC transport
 
 WebSockets over a single TCP port are the default. To opt into UDP WebRTC transport, set `SELKIES_WEBRTC_PUBLIC_IP` and your STUN or TURN variables in `.env`, then layer `compose.webrtc.yml`:
