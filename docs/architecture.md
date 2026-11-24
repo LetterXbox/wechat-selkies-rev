@@ -41,6 +41,7 @@ Evaluated on 2026-11-23 from live GHCR manifests and upstream source:
 
 1. **`init-wechat-bootstrap` (s6-rc oneshot, root, after `init-selkies-end` and before `svc-de`):**
    - Runs `wechat-supervisor bootstrap`.
+   - Persists a stable `/etc/machine-id` in `/config/.wechat-cache/machine-id`. Together with a fixed container `hostname`, this lets WeChat's built-in auto-login survive image upgrades.
    - Reads `/etc/wechat-selkies/wechat.json` (or `WECHAT_DEB_URL` / `WECHAT_DEB_SHA256` overrides).
    - Verifies `/config/.wechat-cache/wechat-<arch>-<sha256_prefix>.deb` locally if present; otherwise streams from `dldir1v6.qq.com` to a temp file, hashes on the fly, and atomically moves into `/config/.wechat-cache/` only on exact SHA-256 match (fail-closed unless `WECHAT_ALLOW_UNVERIFIED_LATEST=true` is explicitly set).
    - Skips `dpkg -i` when `/usr/bin/wechat` and `/var/lib/wechat-selkies/installed.sha256` already match.
