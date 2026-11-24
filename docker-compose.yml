@@ -37,6 +37,8 @@ services:
       - WECHAT_ALLOW_UNVERIFIED_LATEST=${WECHAT_ALLOW_UNVERIFIED_LATEST:-false}
       - WECHAT_NOTIFY_WEBHOOK_URL=${WECHAT_NOTIFY_WEBHOOK_URL:-}
       - WECHAT_NOTIFY_REDACT_BODY=${WECHAT_NOTIFY_REDACT_BODY:-true}
+    security_opt:
+      - seccomp=unconfined
     shm_size: "1gb"
     mem_limit: 2g
 
