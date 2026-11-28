@@ -92,6 +92,10 @@ impl SharedState {
 pub fn spawn_http_server(port: u16, state: Arc<SharedState>) -> Result<()> {
     let listener = TcpListener::bind(("127.0.0.1", port))
         .with_context(|| format!("failed to bind health/control server on 127.0.0.1:{port}"))?;
+    spawn_http_server_with_listener(listener, state)
+}
+
+fn spawn_http_server_with_listener(listener: TcpListener, state: Arc<SharedState>) -> Result<()> {
     listener.set_nonblocking(true)?;
 
     std::thread::Builder::new()
@@ -165,12 +169,18 @@ fn write_http_response(stream: &mut TcpStream, status_line: &str, body: &str) ->
     Ok(())
 }
 
+fn loopback_agent(http_status_as_error: bool) -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(3)))
+        .proxy(None)
+        .http_status_as_error(http_status_as_error)
+        .build()
+        .into()
+}
+
 pub fn probe_health(port: u16) -> Result<()> {
     let url = format!("http://127.0.0.1:{port}/healthz");
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(3)))
-        .build()
-        .into();
+    let agent = loopback_agent(true);
     match agent.get(&url).call() {
         Ok(resp) if resp.status() == 200 => Ok(()),
         Ok(resp) => bail!("healthcheck returned HTTP {}", resp.status().as_u16()),
@@ -178,28 +188,25 @@ pub fn probe_health(port: u16) -> Result<()> {
     }
 }
 
-pub fn print_status(port: u16) -> Result<()> {
+fn fetch_status(port: u16) -> Result<String> {
     let url = format!("http://127.0.0.1:{port}/healthz");
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(3)))
-        .http_status_as_error(false)
-        .build()
-        .into();
+    let agent = loopback_agent(false);
     let mut resp = agent
         .get(&url)
         .call()
         .with_context(|| "status request failed")?;
-    let body = resp.body_mut().read_to_string()?;
+    Ok(resp.body_mut().read_to_string()?)
+}
+
+pub fn print_status(port: u16) -> Result<()> {
+    let body = fetch_status(port)?;
     println!("{body}");
     Ok(())
 }
 
 pub fn send_control(port: u16, action: &str) -> Result<()> {
     let url = format!("http://127.0.0.1:{port}/control/{action}");
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(3)))
-        .build()
-        .into();
+    let agent = loopback_agent(true);
     let resp = agent
         .post(&url)
         .send_empty()
@@ -216,6 +223,33 @@ pub fn send_control(port: u16, action: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
+
+    struct EnvVarGuard {
+        vars: Vec<(&'static str, Option<OsString>)>,
+    }
+
+    impl EnvVarGuard {
+        fn set(entries: &[(&'static str, &str)]) -> Self {
+            let mut vars = Vec::with_capacity(entries.len());
+            for &(key, value) in entries {
+                vars.push((key, std::env::var_os(key)));
+                std::env::set_var(key, value);
+            }
+            Self { vars }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            for (key, previous) in self.vars.drain(..).rev() {
+                match previous {
+                    Some(val) => std::env::set_var(key, val),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
 
     #[test]
     fn health_is_degraded_until_wechat_running_when_autostart_enabled() {
@@ -251,5 +285,34 @@ mod tests {
         let (code, _) = route_request("POST", "/control/fit-window", &state);
         assert_eq!(code, "202 Accepted");
         assert!(state.fit_requested.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn loopback_requests_ignore_http_proxy_env() {
+        let _env = EnvVarGuard::set(&[
+            ("HTTP_PROXY", "http://127.0.0.1:1"),
+            ("http_proxy", "http://127.0.0.1:1"),
+            ("NO_PROXY", ""),
+            ("no_proxy", ""),
+        ]);
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let state = Arc::new(SharedState::new(true, Some("4.1.13.29".to_string())));
+        spawn_http_server_with_listener(listener, Arc::clone(&state)).unwrap();
+
+        assert!(probe_health(port).is_err());
+        let degraded: HealthSnapshot = serde_json::from_str(&fetch_status(port).unwrap()).unwrap();
+        assert_eq!(degraded.status, "degraded");
+
+        state.set_wechat_pid(Some(4242));
+        probe_health(port).unwrap();
+        let healthy: HealthSnapshot = serde_json::from_str(&fetch_status(port).unwrap()).unwrap();
+        assert_eq!(healthy.status, "ok");
+
+        send_control(port, "restart").unwrap();
+        assert!(state.restart_requested.load(Ordering::SeqCst));
+
+        state.shutdown.store(true, Ordering::SeqCst);
     }
 }

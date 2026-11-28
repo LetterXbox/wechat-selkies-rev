@@ -201,35 +201,21 @@ fn download_and_hash(url: &str, dest: &Path) -> Result<String> {
     eprintln!("[wechat-bootstrap] Downloading official WeChat package from {url}");
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_connect(Some(Duration::from_secs(20)))
-        .timeout_recv_response(Some(Duration::from_secs(60)))
-        .timeout_recv_body(Some(Duration::from_secs(300)))
+        .timeout_per_read(Some(Duration::from_secs(300)))
         .build()
         .into();
 
     let mut last_err = None;
     for attempt in 1..=3 {
-        match agent
+        let attempt_result = agent
             .get(url)
             .header("User-Agent", "wechat-selkies-rev/0.1")
             .call()
-        {
-            Ok(resp) => {
-                let mut reader = resp.into_body().into_reader();
-                let mut out = File::create(dest)
-                    .with_context(|| format!("failed to create {}", dest.display()))?;
-                let mut hasher = Sha256::new();
-                let mut buf = [0u8; 128 * 1024];
-                loop {
-                    let n = reader.read(&mut buf)?;
-                    if n == 0 {
-                        break;
-                    }
-                    hasher.update(&buf[..n]);
-                    out.write_all(&buf[..n])?;
-                }
-                out.flush()?;
-                return Ok(hex::encode(hasher.finalize()));
-            }
+            .map_err(anyhow::Error::from)
+            .and_then(|resp| stream_response_to_file(resp, dest));
+
+        match attempt_result {
+            Ok(digest) => return Ok(digest),
             Err(err) => {
                 eprintln!("[wechat-bootstrap] Download attempt {attempt}/3 failed: {err}");
                 let _ = fs::remove_file(dest);
@@ -242,6 +228,24 @@ fn download_and_hash(url: &str, dest: &Path) -> Result<String> {
         "failed to download {url} after 3 attempts: {}",
         last_err.unwrap_or_default()
     )
+}
+
+fn stream_response_to_file(resp: ureq::http::Response<ureq::Body>, dest: &Path) -> Result<String> {
+    let mut reader = resp.into_body().into_reader();
+    let mut out =
+        File::create(dest).with_context(|| format!("failed to create {}", dest.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 128 * 1024];
+    loop {
+        let n = reader.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+        out.write_all(&buf[..n])?;
+    }
+    out.flush()?;
+    Ok(hex::encode(hasher.finalize()))
 }
 
 fn prune_old_cached_debs(cache_dir: &Path, arch: &str, keep: &Path) {
