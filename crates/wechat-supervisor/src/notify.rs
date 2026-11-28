@@ -30,6 +30,7 @@ pub fn spawn_bridge(
 fn bridge_loop(webhook_url: &str, redact_body: bool, state: Arc<SharedState>) {
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(5)))
+        .proxy(None)
         .build()
         .into();
 

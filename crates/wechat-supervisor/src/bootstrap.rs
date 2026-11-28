@@ -202,6 +202,7 @@ fn download_and_hash(url: &str, dest: &Path) -> Result<String> {
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_connect(Some(Duration::from_secs(20)))
         .timeout_per_read(Some(Duration::from_secs(300)))
+        .proxy(None)
         .build()
         .into();
 

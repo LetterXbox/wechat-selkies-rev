@@ -92,13 +92,17 @@ impl SharedState {
 pub fn spawn_http_server(port: u16, state: Arc<SharedState>) -> Result<()> {
     let listener = TcpListener::bind(("127.0.0.1", port))
         .with_context(|| format!("failed to bind health/control server on 127.0.0.1:{port}"))?;
-    spawn_http_server_with_listener(listener, state)
+    let _ = spawn_http_server_with_listener(listener, state)?;
+    Ok(())
 }
 
-fn spawn_http_server_with_listener(listener: TcpListener, state: Arc<SharedState>) -> Result<()> {
+fn spawn_http_server_with_listener(
+    listener: TcpListener,
+    state: Arc<SharedState>,
+) -> Result<std::thread::JoinHandle<()>> {
     listener.set_nonblocking(true)?;
 
-    std::thread::Builder::new()
+    let handle = std::thread::Builder::new()
         .name("health-http".to_string())
         .spawn(move || {
             while !state.shutdown.load(Ordering::Relaxed) {
@@ -116,7 +120,7 @@ fn spawn_http_server_with_listener(listener: TcpListener, state: Arc<SharedState
             }
         })?;
 
-    Ok(())
+    Ok(handle)
 }
 
 fn handle_connection(mut stream: TcpStream, state: &SharedState) -> Result<()> {
@@ -223,32 +227,52 @@ pub fn send_control(port: u16, action: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::ffi::OsString;
+    use std::process::Command;
 
-    struct EnvVarGuard {
-        vars: Vec<(&'static str, Option<OsString>)>,
+    const CHILD_PORT_ENV: &str = "WECHAT_SUPERVISOR_TEST_HEALTH_PORT";
+    const CHILD_PHASE_ENV: &str = "WECHAT_SUPERVISOR_TEST_HEALTH_PHASE";
+
+    struct ServerGuard {
+        state: Arc<SharedState>,
+        handle: Option<std::thread::JoinHandle<()>>,
     }
 
-    impl EnvVarGuard {
-        fn set(entries: &[(&'static str, &str)]) -> Self {
-            let mut vars = Vec::with_capacity(entries.len());
-            for &(key, value) in entries {
-                vars.push((key, std::env::var_os(key)));
-                std::env::set_var(key, value);
-            }
-            Self { vars }
-        }
-    }
-
-    impl Drop for EnvVarGuard {
+    impl Drop for ServerGuard {
         fn drop(&mut self) {
-            for (key, previous) in self.vars.drain(..).rev() {
-                match previous {
-                    Some(val) => std::env::set_var(key, val),
-                    None => std::env::remove_var(key),
-                }
+            self.state.shutdown.store(true, Ordering::SeqCst);
+            if let Some(handle) = self.handle.take() {
+                let _ = handle.join();
             }
         }
+    }
+
+    fn run_proxy_probe_child(port: u16, phase: &str) {
+        let exe = std::env::current_exe().unwrap();
+        let output = Command::new(exe)
+            .args([
+                "--exact",
+                "health::tests::loopback_requests_ignore_http_proxy_env",
+                "--nocapture",
+            ])
+            .env_clear()
+            .env(CHILD_PORT_ENV, port.to_string())
+            .env(CHILD_PHASE_ENV, phase)
+            .env("HTTP_PROXY", "http://127.0.0.1:1")
+            .env("http_proxy", "http://127.0.0.1:1")
+            .env("HTTPS_PROXY", "http://127.0.0.1:1")
+            .env("https_proxy", "http://127.0.0.1:1")
+            .env("ALL_PROXY", "http://127.0.0.1:1")
+            .env("all_proxy", "http://127.0.0.1:1")
+            .env("NO_PROXY", "")
+            .env("no_proxy", "")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "child phase '{phase}' failed:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]
@@ -289,30 +313,43 @@ mod tests {
 
     #[test]
     fn loopback_requests_ignore_http_proxy_env() {
-        let _env = EnvVarGuard::set(&[
-            ("HTTP_PROXY", "http://127.0.0.1:1"),
-            ("http_proxy", "http://127.0.0.1:1"),
-            ("NO_PROXY", ""),
-            ("no_proxy", ""),
-        ]);
+        if let (Ok(port_str), Ok(phase)) = (
+            std::env::var(CHILD_PORT_ENV),
+            std::env::var(CHILD_PHASE_ENV),
+        ) {
+            let port: u16 = port_str.parse().unwrap();
+            match phase.as_str() {
+                "degraded" => {
+                    assert!(probe_health(port).is_err());
+                    let degraded: HealthSnapshot =
+                        serde_json::from_str(&fetch_status(port).unwrap()).unwrap();
+                    assert_eq!(degraded.status, "degraded");
+                }
+                "healthy" => {
+                    probe_health(port).unwrap();
+                    let healthy: HealthSnapshot =
+                        serde_json::from_str(&fetch_status(port).unwrap()).unwrap();
+                    assert_eq!(healthy.status, "ok");
+                    send_control(port, "restart").unwrap();
+                }
+                other => panic!("unexpected test phase: {other}"),
+            }
+            return;
+        }
 
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
         let state = Arc::new(SharedState::new(true, Some("4.1.13.29".to_string())));
-        spawn_http_server_with_listener(listener, Arc::clone(&state)).unwrap();
+        let handle = spawn_http_server_with_listener(listener, Arc::clone(&state)).unwrap();
+        let _server = ServerGuard {
+            state: Arc::clone(&state),
+            handle: Some(handle),
+        };
 
-        assert!(probe_health(port).is_err());
-        let degraded: HealthSnapshot = serde_json::from_str(&fetch_status(port).unwrap()).unwrap();
-        assert_eq!(degraded.status, "degraded");
+        run_proxy_probe_child(port, "degraded");
 
         state.set_wechat_pid(Some(4242));
-        probe_health(port).unwrap();
-        let healthy: HealthSnapshot = serde_json::from_str(&fetch_status(port).unwrap()).unwrap();
-        assert_eq!(healthy.status, "ok");
-
-        send_control(port, "restart").unwrap();
+        run_proxy_probe_child(port, "healthy");
         assert!(state.restart_requested.load(Ordering::SeqCst));
-
-        state.shutdown.store(true, Ordering::SeqCst);
     }
 }
