@@ -199,20 +199,22 @@ fn ensure_cached_deb(cache_dir: &Path, pkg: &ResolvedPackage) -> Result<(PathBuf
 
 fn download_and_hash(url: &str, dest: &Path) -> Result<String> {
     eprintln!("[wechat-bootstrap] Downloading official WeChat package from {url}");
-    let agent = ureq::AgentBuilder::new()
-        .timeout_connect(Duration::from_secs(20))
-        .timeout_read(Duration::from_secs(300))
-        .build();
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_connect(Some(Duration::from_secs(20)))
+        .timeout_recv_response(Some(Duration::from_secs(60)))
+        .timeout_recv_body(Some(Duration::from_secs(300)))
+        .build()
+        .into();
 
     let mut last_err = None;
     for attempt in 1..=3 {
         match agent
             .get(url)
-            .set("User-Agent", "wechat-selkies-rev/0.1")
+            .header("User-Agent", "wechat-selkies-rev/0.1")
             .call()
         {
             Ok(resp) => {
-                let mut reader = resp.into_reader();
+                let mut reader = resp.into_body().into_reader();
                 let mut out = File::create(dest)
                     .with_context(|| format!("failed to create {}", dest.display()))?;
                 let mut hasher = Sha256::new();

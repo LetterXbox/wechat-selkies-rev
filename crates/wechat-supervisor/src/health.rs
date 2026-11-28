@@ -167,41 +167,48 @@ fn write_http_response(stream: &mut TcpStream, status_line: &str, body: &str) ->
 
 pub fn probe_health(port: u16) -> Result<()> {
     let url = format!("http://127.0.0.1:{port}/healthz");
-    let agent = ureq::AgentBuilder::new()
-        .timeout(Duration::from_secs(3))
-        .build();
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(3)))
+        .build()
+        .into();
     match agent.get(&url).call() {
         Ok(resp) if resp.status() == 200 => Ok(()),
-        Ok(resp) => bail!("healthcheck returned HTTP {}", resp.status()),
+        Ok(resp) => bail!("healthcheck returned HTTP {}", resp.status().as_u16()),
         Err(err) => bail!("healthcheck request failed: {err}"),
     }
 }
 
 pub fn print_status(port: u16) -> Result<()> {
     let url = format!("http://127.0.0.1:{port}/healthz");
-    let agent = ureq::AgentBuilder::new()
-        .timeout(Duration::from_secs(3))
-        .build();
-    let body = match agent.get(&url).call() {
-        Ok(resp) => resp.into_string()?,
-        Err(ureq::Error::Status(_, resp)) => resp.into_string()?,
-        Err(err) => bail!("status request failed: {err}"),
-    };
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(3)))
+        .http_status_as_error(false)
+        .build()
+        .into();
+    let mut resp = agent
+        .get(&url)
+        .call()
+        .with_context(|| "status request failed")?;
+    let body = resp.body_mut().read_to_string()?;
     println!("{body}");
     Ok(())
 }
 
 pub fn send_control(port: u16, action: &str) -> Result<()> {
     let url = format!("http://127.0.0.1:{port}/control/{action}");
-    let agent = ureq::AgentBuilder::new()
-        .timeout(Duration::from_secs(3))
-        .build();
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(3)))
+        .build()
+        .into();
     let resp = agent
         .post(&url)
-        .call()
+        .send_empty()
         .with_context(|| format!("control action '{action}' failed"))?;
-    if resp.status() >= 300 {
-        bail!("control action '{action}' returned HTTP {}", resp.status());
+    if resp.status().as_u16() >= 300 {
+        bail!(
+            "control action '{action}' returned HTTP {}",
+            resp.status().as_u16()
+        );
     }
     Ok(())
 }
