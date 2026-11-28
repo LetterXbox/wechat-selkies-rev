@@ -28,9 +28,11 @@ pub fn spawn_bridge(
 }
 
 fn bridge_loop(webhook_url: &str, redact_body: bool, state: Arc<SharedState>) {
-    let agent = ureq::AgentBuilder::new()
-        .timeout(Duration::from_secs(5))
-        .build();
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(5)))
+        .proxy(None)
+        .build()
+        .into();
 
     while !state.shutdown.load(Ordering::Relaxed) {
         let mut child = match Command::new("dbus-monitor")
@@ -64,8 +66,8 @@ fn bridge_loop(webhook_url: &str, redact_body: bool, state: Arc<SharedState>) {
                     if let Ok(json) = serde_json::to_string(&payload) {
                         if let Err(err) = agent
                             .post(webhook_url)
-                            .set("Content-Type", "application/json")
-                            .send_string(&json)
+                            .header("Content-Type", "application/json")
+                            .send(&json)
                         {
                             eprintln!("[wechat-notify] Webhook post failed: {err}");
                         }

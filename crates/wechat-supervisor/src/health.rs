@@ -92,9 +92,17 @@ impl SharedState {
 pub fn spawn_http_server(port: u16, state: Arc<SharedState>) -> Result<()> {
     let listener = TcpListener::bind(("127.0.0.1", port))
         .with_context(|| format!("failed to bind health/control server on 127.0.0.1:{port}"))?;
+    let _ = spawn_http_server_with_listener(listener, state)?;
+    Ok(())
+}
+
+fn spawn_http_server_with_listener(
+    listener: TcpListener,
+    state: Arc<SharedState>,
+) -> Result<std::thread::JoinHandle<()>> {
     listener.set_nonblocking(true)?;
 
-    std::thread::Builder::new()
+    let handle = std::thread::Builder::new()
         .name("health-http".to_string())
         .spawn(move || {
             while !state.shutdown.load(Ordering::Relaxed) {
@@ -112,7 +120,7 @@ pub fn spawn_http_server(port: u16, state: Arc<SharedState>) -> Result<()> {
             }
         })?;
 
-    Ok(())
+    Ok(handle)
 }
 
 fn handle_connection(mut stream: TcpStream, state: &SharedState) -> Result<()> {
@@ -165,43 +173,53 @@ fn write_http_response(stream: &mut TcpStream, status_line: &str, body: &str) ->
     Ok(())
 }
 
+fn loopback_agent(http_status_as_error: bool) -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(3)))
+        .proxy(None)
+        .http_status_as_error(http_status_as_error)
+        .build()
+        .into()
+}
+
 pub fn probe_health(port: u16) -> Result<()> {
     let url = format!("http://127.0.0.1:{port}/healthz");
-    let agent = ureq::AgentBuilder::new()
-        .timeout(Duration::from_secs(3))
-        .build();
+    let agent = loopback_agent(true);
     match agent.get(&url).call() {
         Ok(resp) if resp.status() == 200 => Ok(()),
-        Ok(resp) => bail!("healthcheck returned HTTP {}", resp.status()),
+        Ok(resp) => bail!("healthcheck returned HTTP {}", resp.status().as_u16()),
         Err(err) => bail!("healthcheck request failed: {err}"),
     }
 }
 
-pub fn print_status(port: u16) -> Result<()> {
+fn fetch_status(port: u16) -> Result<String> {
     let url = format!("http://127.0.0.1:{port}/healthz");
-    let agent = ureq::AgentBuilder::new()
-        .timeout(Duration::from_secs(3))
-        .build();
-    let body = match agent.get(&url).call() {
-        Ok(resp) => resp.into_string()?,
-        Err(ureq::Error::Status(_, resp)) => resp.into_string()?,
-        Err(err) => bail!("status request failed: {err}"),
-    };
+    let agent = loopback_agent(false);
+    let mut resp = agent
+        .get(&url)
+        .call()
+        .with_context(|| "status request failed")?;
+    Ok(resp.body_mut().read_to_string()?)
+}
+
+pub fn print_status(port: u16) -> Result<()> {
+    let body = fetch_status(port)?;
     println!("{body}");
     Ok(())
 }
 
 pub fn send_control(port: u16, action: &str) -> Result<()> {
     let url = format!("http://127.0.0.1:{port}/control/{action}");
-    let agent = ureq::AgentBuilder::new()
-        .timeout(Duration::from_secs(3))
-        .build();
+    let agent = loopback_agent(true);
     let resp = agent
         .post(&url)
-        .call()
+        .send_empty()
         .with_context(|| format!("control action '{action}' failed"))?;
-    if resp.status() >= 300 {
-        bail!("control action '{action}' returned HTTP {}", resp.status());
+    if resp.status().as_u16() >= 300 {
+        bail!(
+            "control action '{action}' returned HTTP {}",
+            resp.status().as_u16()
+        );
     }
     Ok(())
 }
@@ -209,6 +227,53 @@ pub fn send_control(port: u16, action: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
+
+    const CHILD_PORT_ENV: &str = "WECHAT_SUPERVISOR_TEST_HEALTH_PORT";
+    const CHILD_PHASE_ENV: &str = "WECHAT_SUPERVISOR_TEST_HEALTH_PHASE";
+
+    struct ServerGuard {
+        state: Arc<SharedState>,
+        handle: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl Drop for ServerGuard {
+        fn drop(&mut self) {
+            self.state.shutdown.store(true, Ordering::SeqCst);
+            if let Some(handle) = self.handle.take() {
+                let _ = handle.join();
+            }
+        }
+    }
+
+    fn run_proxy_probe_child(port: u16, phase: &str) {
+        let exe = std::env::current_exe().unwrap();
+        let output = Command::new(exe)
+            .args([
+                "--exact",
+                "health::tests::loopback_requests_ignore_http_proxy_env",
+                "--nocapture",
+            ])
+            .env_clear()
+            .env(CHILD_PORT_ENV, port.to_string())
+            .env(CHILD_PHASE_ENV, phase)
+            .env("HTTP_PROXY", "http://127.0.0.1:1")
+            .env("http_proxy", "http://127.0.0.1:1")
+            .env("HTTPS_PROXY", "http://127.0.0.1:1")
+            .env("https_proxy", "http://127.0.0.1:1")
+            .env("ALL_PROXY", "http://127.0.0.1:1")
+            .env("all_proxy", "http://127.0.0.1:1")
+            .env("NO_PROXY", "")
+            .env("no_proxy", "")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "child phase '{phase}' failed:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 
     #[test]
     fn health_is_degraded_until_wechat_running_when_autostart_enabled() {
@@ -244,5 +309,47 @@ mod tests {
         let (code, _) = route_request("POST", "/control/fit-window", &state);
         assert_eq!(code, "202 Accepted");
         assert!(state.fit_requested.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn loopback_requests_ignore_http_proxy_env() {
+        if let (Ok(port_str), Ok(phase)) = (
+            std::env::var(CHILD_PORT_ENV),
+            std::env::var(CHILD_PHASE_ENV),
+        ) {
+            let port: u16 = port_str.parse().unwrap();
+            match phase.as_str() {
+                "degraded" => {
+                    assert!(probe_health(port).is_err());
+                    let degraded: HealthSnapshot =
+                        serde_json::from_str(&fetch_status(port).unwrap()).unwrap();
+                    assert_eq!(degraded.status, "degraded");
+                }
+                "healthy" => {
+                    probe_health(port).unwrap();
+                    let healthy: HealthSnapshot =
+                        serde_json::from_str(&fetch_status(port).unwrap()).unwrap();
+                    assert_eq!(healthy.status, "ok");
+                    send_control(port, "restart").unwrap();
+                }
+                other => panic!("unexpected test phase: {other}"),
+            }
+            return;
+        }
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let state = Arc::new(SharedState::new(true, Some("4.1.13.29".to_string())));
+        let handle = spawn_http_server_with_listener(listener, Arc::clone(&state)).unwrap();
+        let _server = ServerGuard {
+            state: Arc::clone(&state),
+            handle: Some(handle),
+        };
+
+        run_proxy_probe_child(port, "degraded");
+
+        state.set_wechat_pid(Some(4242));
+        run_proxy_probe_child(port, "healthy");
+        assert!(state.restart_requested.load(Ordering::SeqCst));
     }
 }
